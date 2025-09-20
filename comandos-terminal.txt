@@ -1,0 +1,7 @@
+Via terminal:
+
+pio run (build)
+
+pio run -t upload (upload)
+
+pio device monitor (serial)
