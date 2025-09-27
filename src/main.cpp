@@ -4,6 +4,26 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 
+// ======== LED de estado da luz ========
+const int LED_LUZ_PIN = 19;     // use 25/27/32/33 para LED externo
+const bool LED_ATIVO_ALTO = true; // true: HIGH acende | false: LOW acende
+
+// ----- LUZ (BH1750) -----
+#include <Wire.h>
+#include <BH1750.h>
+
+BH1750 lightMeter(0x23);             // 0x23 (ADDR em GND/desconectado) | 0x5C (ADDR em 3V3)
+const char* mqtt_topic_lux     = "grupothales/lux";
+const char* mqtt_topic_luzflag = "grupothales/luz";   // ON/OFF
+
+unsigned long lastLuxMs = 0;
+const unsigned long LUX_INTERVAL_MS = 2000; // lê a cada 2s
+
+// Histerese simples (ajuste conforme o ambiente)
+const float LUX_ON  = 60.0;  // acima disso: consideramos “luz ligada”
+const float LUX_OFF = 40.0;  // abaixo disso: consideramos “luz desligada”
+bool luzLigada = false;
+
 // ======== SENSOR ========
 const int PIR_PIN = 13;
 int lastState = LOW;
@@ -36,7 +56,7 @@ const int   mqtt_port   = 1883;
 const char* mqtt_topic  = "grupothales/teste";
 
 // ======== CONFIG FLASK (API externa) ========
-const char* FLASK_BASE = "http://192.168.64.90:5000"; // << TROQUE pelo IP do PC com Flask
+const char* FLASK_BASE = "http://192.168.64.91:5000"; // << TROQUE pelo IP do PC com Flask
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -161,6 +181,14 @@ bool fetch_sensor_enabled(bool &outEnabled) {
 }
 
 void setup() {
+  pinMode(LED_LUZ_PIN, OUTPUT);
+  digitalWrite(LED_LUZ_PIN, LED_ATIVO_ALTO ? LOW : HIGH); // começa apagado
+  Wire.begin(21, 22);
+  if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE)) {
+    Serial.println("[BH1750] OK");
+  } else {
+    Serial.println("[BH1750] ERRO ao iniciar (confira ligacoes/endereco)");
+  }
   Serial.begin(115200);
   pinMode(PIR_PIN, INPUT);
 
@@ -191,6 +219,39 @@ void loop() {
   // Garante conexão MQTT
   if (!client.connected()) reconnect();
   client.loop();
+  
+// ======== LUZ: ler BH1750 e decidir se ligou/desligou ========
+if (millis() - lastLuxMs >= LUX_INTERVAL_MS) {
+  lastLuxMs = millis();
+  float lux = lightMeter.readLightLevel();
+
+  if (lux < 0 || isnan(lux)) {
+    Serial.println("[BH1750] leitura invalida");
+  } else {
+    // Log e publish do valor
+    char buf[32]; snprintf(buf, sizeof(buf), "%.2f", lux);
+    Serial.printf("[BH1750] %.2f lux\n", lux);
+    client.publish(mqtt_topic_lux, buf, true); // retain opcional
+
+    // IF simples com histerese mínima:
+    // Quando ligar a luz:
+    if (!luzLigada && lux >= LUX_ON) {
+      luzLigada = true;
+      Serial.println("[LUZ] Ligada (detecao por lux)");
+      client.publish(mqtt_topic_luzflag, "ON", true);
+      http_post_event("light", "ON"); // se estiver usando Flask
+      digitalWrite(LED_LUZ_PIN, LED_ATIVO_ALTO ? HIGH : LOW);   // ACENDE LED
+    }
+    // Quando desligar a luz:
+    else if (luzLigada && lux <= LUX_OFF) {
+      luzLigada = false;
+      Serial.println("[LUZ] Desligada (detecao por lux)");
+      client.publish(mqtt_topic_luzflag, "OFF", true);
+      http_post_event("light", "OFF");
+      digitalWrite(LED_LUZ_PIN, LED_ATIVO_ALTO ? LOW : HIGH);   // APAGA LED
+    }
+  }
+}
 
   // puxa estado do sensor do Flask a cada 3s
   static uint32_t lastFetch = 0;
